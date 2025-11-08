@@ -25,14 +25,14 @@ set -euo pipefail
 # =========================
 
 # --------- Defaults ---------
-PROJECT_ID=""
+PROJECT_ID="llama-3v2-1b-fine-tuning"
 REGION="us-central1"
 AR_FORMAT="docker"
 AR_LOC="us"                 # Artifact Registry location (multi-region)
 WORKER_REPO="worker"
 JOB_REPO="job"
 
-BUCKET_NAME=""
+BUCKET_NAME="llama-3v2-1b-fine-tuning-bucket"
 PUBSUB_TOPIC="worker-job-topic"
 PUBSUB_SUB="worker-job-sub"
 BQ_DATASET="wrkjob_ds"
