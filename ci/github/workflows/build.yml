@@ -1,0 +1,73 @@
+name: Build worker & job
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  # ==== Config local del repo ====
+  AR_LOC: us             # us, eu o asia
+  PROJECT_ID: ""         # <tu-proyecto> (déjalo vacío para solo build)
+  WORKER_REPO: worker
+  JOB_REPO: job
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component:
+          - name: worker
+            path: worker
+            repo: ${{ env.WORKER_REPO }}
+          - name: job
+            path: job
+            repo: ${{ env.JOB_REPO }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ====== Build local siempre ======
+      - name: Build ${{ matrix.component.name }} image
+        run: |
+          IMAGE=${{ matrix.component.name }}
+          docker build -t $IMAGE:local ./${{ matrix.component.path }}
+
+      - name: Smoke run ${{ matrix.component.name }}
+        run: |
+          docker run --rm ${{ matrix.component.name }}:local
+
+      # ====== (Opcional) Push a Artifact Registry con OIDC ======
+      # Rellena PROJECT_ID arriba y configura Workload Identity Federation
+      # Secrets requeridos: nada (OIDC). Solo permisos "id-token: write".
+      - name: Auth to Google Cloud (OIDC)
+        if: env.PROJECT_ID != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Setup gcloud
+        if: env.PROJECT_ID != ''
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker to Artifact Registry
+        if: env.PROJECT_ID != ''
+        run: |
+          gcloud auth configure-docker ${{ env.AR_LOC }}-docker.pkg.dev --quiet
+
+      - name: Tag & Push ${{ matrix.component.name }}
+        if: env.PROJECT_ID != ''
+        run: |
+          COMMIT=${{ github.sha }}
+          REG=${{ env.AR_LOC }}-docker.pkg.dev
+          REPO=${{ env.PROJECT_ID }}/${{ matrix.component.repo }}
+          IMG=${{ matrix.component.name }}
+          docker tag $IMG:local $REG/$REPO/$IMG:$COMMIT
+          docker tag $IMG:local $REG/$REPO/$IMG:latest
+          docker push $REG/$REPO/$IMG:$COMMIT
+          docker push $REG/$REPO/$IMG:latest
