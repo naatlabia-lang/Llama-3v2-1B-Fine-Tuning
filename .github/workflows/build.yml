@@ -21,7 +21,7 @@ permissions:
 env:
   AR_LOC: ${{ vars.AR_LOC }}
   PROJECT_ID: ${{ vars.PROJECT_ID }}
-  WORKER_REPO: ${{ vars.WORKER_REPO }}        
+  WORKER_REPO: ${{ vars.WORKER_REPO }}
   JOB_REPO: ${{ vars.JOB_REPO }}
   WORKER_TORCH_DEVICE: ${{ vars.WORKER_TORCH_DEVICE }}   # cpu | cu121
   JOB_TORCH_DEVICE: ${{ vars.JOB_TORCH_DEVICE }}         # cpu | cu121
@@ -71,112 +71,6 @@ jobs:
 
       - name: Build ${{ matrix.name }}
         run: |
-          # Selecciona dispositivo por componente
-          DEVICE="${{ matrix.name == 'worker' && env.WORKER_TORCH_DEVICE || env.JOB_TORCH_DEVICE }}"
-          docker build \
-            --build-arg TORCH_DEVICE=${DEVICE:-cpu} \
-            -t ${{ matrix.name }}:local ./${{ matrix.path }}
-
-      - name: Smoke ${{ matrix.name }}
-        run: docker run --rm ${{ matrix.name }}:local
-
-      - name: Auth to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          token_format: 'access_token'
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Docker login to Artifact Registry
-        run: gcloud auth configure-docker ${{ env.AR_LOC }}-docker.pkg.dev --quiet
-
-      - name: Tag & Push ${{ matrix.name }}
-        run: |
-          REG=${{ env.AR_LOC }}-docker.pkg.dev
-          REPO=${{ env.PROJECT_ID }}/${{ matrix.repo }}
-          IMG=${{ matrix.name }}
-          SHA=${{ github.sha }}
-          docker tag $IMG:local $REG/$REPO/$IMG:$SHA
-          docker tag $IMG:local $REG/$REPO/$IMG:latest
-          docker push $REG/$REPO/$IMG:$SHA
-          docker push $REG/$REPO/$IMG:latest
-name: Build worker/job (changed paths)
-
-on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - "worker/**"
-      - "job/**"
-      - ".github/workflows/build.yml"
-  pull_request:
-    branches: [ "main" ]
-    paths:
-      - "worker/**"
-      - "job/**"
-      - ".github/workflows/build.yml"
-
-permissions:
-  contents: read
-  id-token: write
-
-env:
-  AR_LOC: ${{ vars.AR_LOC }}
-  PROJECT_ID: ${{ vars.PROJECT_ID }}
-  WORKER_REPO: ${{ vars.WORKER_REPO }}         # <-- fix
-  JOB_REPO: ${{ vars.JOB_REPO }}
-  WORKER_TORCH_DEVICE: ${{ vars.WORKER_TORCH_DEVICE }}   # cpu | cu121
-  JOB_TORCH_DEVICE: ${{ vars.JOB_TORCH_DEVICE }}         # cpu | cu121
-
-jobs:
-  plan-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            worker:
-              - 'worker/**'
-            job:
-              - 'job/**'
-
-      - name: Set matrix
-        id: set
-        run: |
-          comps=()
-          if [ "${{ steps.filter.outputs.worker }}" = "true" ]; then
-            comps+=('{"name":"worker","path":"worker","repo":"'"${{ env.WORKER_REPO }}"'"}')
-          fi
-          if [ "${{ steps.filter.outputs.job }}" = "true" ]; then
-            comps+=('{"name":"job","path":"job","repo":"'"${{ env.JOB_REPO }}"'"}')
-          fi
-          if [ ${#comps[@]} -eq 0 ]; then
-            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
-          else
-            echo 'matrix={"include":['$(IFS=,; echo "${comps[*]}")']}' >> "$GITHUB_OUTPUT"
-          fi
-
-  docker-build:
-    needs: plan-matrix
-    if: ${{ needs.plan-matrix.outputs.matrix != '{"include":[]}' }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix: ${{ fromJson(needs.plan-matrix.outputs.matrix) }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build ${{ matrix.name }}
-        run: |
-          # Selecciona dispositivo por componente
           DEVICE="${{ matrix.name == 'worker' && env.WORKER_TORCH_DEVICE || env.JOB_TORCH_DEVICE }}"
           docker build \
             --build-arg TORCH_DEVICE=${DEVICE:-cpu} \
