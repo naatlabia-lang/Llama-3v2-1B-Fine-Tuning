@@ -46,13 +46,27 @@ jobs:
       - id: set
         shell: bash
         run: |
-          MATRIX='{"include":[]}'
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+
+          MATRIX=$(jq -cn '{include: []}')
+
           if [[ "${{ steps.changes.outputs.worker }}" == 'true' ]]; then
-            MATRIX=$(jq '.include += [{"name":"worker","path":"worker","repo":"'"${{ env.WORKER_REPO }}"'","torch":"'"${{ env.WORKER_TORCH_DEVICE }}"'"}]' <<<"$MATRIX")
+            MATRIX=$(jq -c \
+              --arg repo "${{ env.WORKER_REPO }}" \
+              --arg torch "${{ env.WORKER_TORCH_DEVICE }}" \
+              '.include += [{name:"worker",path:"worker",repo:$repo,torch:$torch}]' \
+              <<<"$MATRIX")
           fi
+
           if [[ "${{ steps.changes.outputs.job }}" == 'true' ]]; then
-            MATRIX=$(jq '.include += [{"name":"job","path":"job","repo":"'"${{ env.JOB_REPO }}"'","torch":"'"${{ env.JOB_TORCH_DEVICE }}"'"}]' <<<"$MATRIX")
+            MATRIX=$(jq -c \
+              --arg repo "${{ env.JOB_REPO }}" \
+              --arg torch "${{ env.JOB_TORCH_DEVICE }}" \
+              '.include += [{name:"job",path:"job",repo:$repo,torch:$torch}]' \
+              <<<"$MATRIX")
           fi
+
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   build-and-push:
