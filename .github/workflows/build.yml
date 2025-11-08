@@ -7,7 +7,6 @@ on:
       - "worker/**"
       - "job/**"
       - ".github/workflows/build.yml"
-  # Nota: los secrets NO se inyectan en PRs desde forks.
   pull_request:
     branches: [ "main" ]
     paths:
@@ -17,15 +16,15 @@ on:
 
 permissions:
   contents: read
-  # id-token: write   # <- ya no es necesario con credentials_json
+  id-token: write
 
 env:
   AR_LOC: ${{ vars.AR_LOC }}
   PROJECT_ID: ${{ vars.PROJECT_ID }}
   WORKER_REPO: ${{ vars.WORKER_REPO }}
   JOB_REPO: ${{ vars.JOB_REPO }}
-  WORKER_TORCH_DEVICE: ${{ vars.WORKER_TORCH_DEVICE }}   # cpu | cu121
-  JOB_TORCH_DEVICE: ${{ vars.JOB_TORCH_DEVICE }}         # cpu | cu121
+  WORKER_TORCH_DEVICE: ${{ vars.WORKER_TORCH_DEVICE }}   # cpu | cu121 | cu122, etc.
+  JOB_TORCH_DEVICE: ${{ vars.JOB_TORCH_DEVICE }}         # cpu | cu121 | cu122, etc.
 
 jobs:
   plan-matrix:
@@ -35,8 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dorny/paths-filter@v3
-        id: filter
+      - id: changes
+        uses: dorny/paths-filter@v3
         with:
           filters: |
             worker:
@@ -44,46 +43,36 @@ jobs:
             job:
               - 'job/**'
 
-      - name: Set matrix
-        id: set
+      - id: set
+        shell: bash
         run: |
-          comps=()
-          if [ "${{ steps.filter.outputs.worker }}" = "true" ]; then
-            comps+=('{"name":"worker","path":"worker","repo":"'"${{ env.WORKER_REPO }}"'"}')
+          MATRIX='{"include":[]}'
+          if [[ "${{ steps.changes.outputs.worker }}" == 'true' ]]; then
+            MATRIX=$(jq '.include += [{"name":"worker","path":"worker","repo":"'"${{ env.WORKER_REPO }}"'","torch":"'"${{ env.WORKER_TORCH_DEVICE }}"'"}]' <<<"$MATRIX")
           fi
-          if [ "${{ steps.filter.outputs.job }}" = "true" ]; then
-            comps+=('{"name":"job","path":"job","repo":"'"${{ env.JOB_REPO }}"'"}')
+          if [[ "${{ steps.changes.outputs.job }}" == 'true' ]]; then
+            MATRIX=$(jq '.include += [{"name":"job","path":"job","repo":"'"${{ env.JOB_REPO }}"'","torch":"'"${{ env.JOB_TORCH_DEVICE }}"'"}]' <<<"$MATRIX")
           fi
-          if [ ${#comps[@]} -eq 0 ]; then
-            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
-          else
-            echo 'matrix={"include":['$(IFS=,; echo "${comps[*]}")']}' >> "$GITHUB_OUTPUT"
-          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
-  docker-build:
+  build-and-push:
     needs: plan-matrix
     if: ${{ needs.plan-matrix.outputs.matrix != '{"include":[]}' }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix: ${{ fromJson(needs.plan-matrix.outputs.matrix) }}
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build ${{ matrix.name }}
-        run: |
-          DEVICE="${{ matrix.name == 'worker' && env.WORKER_TORCH_DEVICE || env.JOB_TORCH_DEVICE }}"
-          docker build \
-            --build-arg TORCH_DEVICE=${DEVICE:-cpu} \
-            -t ${{ matrix.name }}:local ./${{ matrix.path }}
-
-      - name: Smoke ${{ matrix.name }}
-        run: docker run --rm ${{ matrix.name }}:local
-
-      # --- Auth con JSON (usa el secret GCP_CREDENTIALS) ---
       - name: Check secret present
+        shell: bash
         run: |
-          [ -n "${{ secrets.GCP_CREDENTIALS }}" ] || { echo "Missing GCP_CREDENTIALS secret"; exit 1; }
+          if [[ -z "${{ secrets.GCP_CREDENTIALS }}" ]]; then
+            echo "Missing GCP_CREDENTIALS secret"
+            exit 1
+          fi
+          echo "Secret is present"
 
       - name: Auth to Google Cloud (JSON)
         uses: google-github-actions/auth@v2
@@ -94,15 +83,27 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Docker login to Artifact Registry
-        run: gcloud auth configure-docker ${{ env.AR_LOC }}-docker.pkg.dev --quiet
-
-      - name: Tag & Push ${{ matrix.name }}
         run: |
-          REG=${{ env.AR_LOC }}-docker.pkg.dev
-          REPO=${{ env.PROJECT_ID }}/${{ matrix.repo }}
-          IMG=${{ matrix.name }}
-          SHA=${{ github.sha }}
-          docker tag $IMG:local $REG/$REPO/$IMG:$SHA
-          docker tag $IMG:local $REG/$REPO/$IMG:latest
-          docker push $REG/$REPO/$IMG:$SHA
-          docker push $REG/$REPO/$IMG:latest
+          gcloud auth configure-docker "${{ env.AR_LOC }}-docker.pkg.dev" --quiet
+
+      - name: Build image
+        env:
+          IMAGE_BASE: ${{ env.AR_LOC }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ matrix.repo }}
+          TORCH: ${{ matrix.torch }}
+          NAME: ${{ matrix.name }}
+          PATH_DIR: ${{ matrix.path }}
+        run: |
+          IMAGE_TAG_SHA="${IMAGE_BASE}:${NAME}-${TORCH}-${GITHUB_SHA}"
+          IMAGE_TAG_LATEST="${IMAGE_BASE}:${NAME}-${TORCH}-latest"
+          echo "IMAGE_TAG_SHA=$IMAGE_TAG_SHA" >> $GITHUB_ENV
+          echo "IMAGE_TAG_LATEST=$IMAGE_TAG_LATEST" >> $GITHUB_ENV
+          docker build \
+            --build-arg TORCH_DEVICE="$TORCH" \
+            -t "$IMAGE_TAG_SHA" \
+            -f "${PATH_DIR}/Dockerfile" "${PATH_DIR}"
+
+      - name: Tag & Push image
+        run: |
+          docker tag "$IMAGE_TAG_SHA" "$IMAGE_TAG_LATEST"
+          docker push "$IMAGE_TAG_SHA"
+          docker push "$IMAGE_TAG_LATEST"
