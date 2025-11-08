@@ -1,0 +1,11 @@
+numpy
+pandas
+scipy
+scikit-learn
+tqdm
+matplotlib
+pillow
+requests
+pyyaml
+torchmetrics
+transformers
