@@ -7,6 +7,7 @@ on:
       - "worker/**"
       - "job/**"
       - ".github/workflows/build.yml"
+  # Nota: los secrets NO se inyectan en PRs desde forks.
   pull_request:
     branches: [ "main" ]
     paths:
@@ -16,7 +17,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  # id-token: write   # <- ya no es necesario con credentials_json
 
 env:
   AR_LOC: ${{ vars.AR_LOC }}
@@ -79,12 +80,15 @@ jobs:
       - name: Smoke ${{ matrix.name }}
         run: docker run --rm ${{ matrix.name }}:local
 
-      - name: Auth to Google Cloud
+      # --- Auth con JSON (usa el secret GCP_CREDENTIALS) ---
+      - name: Check secret present
+        run: |
+          [ -n "${{ secrets.GCP_CREDENTIALS }}" ] || { echo "Missing GCP_CREDENTIALS secret"; exit 1; }
+
+      - name: Auth to Google Cloud (JSON)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          token_format: 'access_token'
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
