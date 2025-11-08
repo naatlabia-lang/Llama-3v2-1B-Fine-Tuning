@@ -104,15 +104,20 @@ jobs:
 
       - name: Build image
         env:
-          IMAGE_BASE: ${{ env.AR_LOC }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ matrix.repo }}
+          REG_HOST: ${{ env.AR_LOC }}-docker.pkg.dev
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          REPO: ${{ matrix.repo }}      
+          IMAGE: ${{ matrix.name }}     
           TORCH: ${{ matrix.torch }}
-          NAME: ${{ matrix.name }}
           PATH_DIR: ${{ matrix.path }}
         run: |
-          IMAGE_TAG_SHA="${IMAGE_BASE}:${NAME}-${TORCH}-${GITHUB_SHA}"
-          IMAGE_TAG_LATEST="${IMAGE_BASE}:${NAME}-${TORCH}-latest"
+          IMAGE_BASE="${REG_HOST}/${PROJECT_ID}/${REPO}/${IMAGE}"
+          IMAGE_TAG_SHA="${IMAGE_BASE}:${TORCH}-${GITHUB_SHA}"
+          IMAGE_TAG_LATEST="${IMAGE_BASE}:${TORCH}-latest"
+
           echo "IMAGE_TAG_SHA=$IMAGE_TAG_SHA" >> $GITHUB_ENV
           echo "IMAGE_TAG_LATEST=$IMAGE_TAG_LATEST" >> $GITHUB_ENV
+
           docker build \
             --build-arg TORCH_DEVICE="$TORCH" \
             -t "$IMAGE_TAG_SHA" \
