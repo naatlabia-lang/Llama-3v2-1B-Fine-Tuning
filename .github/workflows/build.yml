@@ -1,50 +1,83 @@
-name: Build worker & job
+name: Build worker/job (changed paths)
 
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - "worker/**"
+      - "job/**"
+      - ".github/workflows/build.yml"
   pull_request:
     branches: [ "main" ]
+    paths:
+      - "worker/**"
+      - "job/**"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+  id-token: write   # necesario para OIDC
 
 env:
-  # ==== Config local del repo ====
-  AR_LOC: us             # us, eu o asia
-  PROJECT_ID: ""         # <tu-proyecto> (déjalo vacío para solo build)
+  AR_LOC: us                     # us | eu | asia
+  PROJECT_ID: your-gcp-project   # <--- pon tu proyecto
   WORKER_REPO: worker
   JOB_REPO: job
 
 jobs:
+  plan-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Detecta qué carpeta cambió
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            worker:
+              - 'worker/**'
+            job:
+              - 'job/**'
+
+      - name: Set matrix
+        id: set
+        run: |
+          comps=()
+          if [ "${{ steps.filter.outputs.worker }}" = "true" ]; then
+            comps+=('{"name":"worker","path":"worker","repo":"'"${{ env.WORKER_REPO }}"'"}')
+          fi
+          if [ "${{ steps.filter.outputs.job }}" = "true" ]; then
+            comps+=('{"name":"job","path":"job","repo":"'"${{ env.JOB_REPO }}"'"}')
+          fi
+          if [ ${#comps[@]} -eq 0 ]; then
+            # seguridad: si no detectó cambios, no construir
+            echo '::set-output name=matrix::{"include":[]}'
+          else
+            echo '::set-output name=matrix::{"include":['$(IFS=,; echo "${comps[*]}")']}'
+          fi
+
   docker-build:
+    needs: plan-matrix
+    if: ${{ needs.plan-matrix.outputs.matrix != '{"include":[]}' }}
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        component:
-          - name: worker
-            path: worker
-            repo: ${{ env.WORKER_REPO }}
-          - name: job
-            path: job
-            repo: ${{ env.JOB_REPO }}
+      matrix: ${{ fromJson(needs.plan-matrix.outputs.matrix) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ====== Build local siempre ======
-      - name: Build ${{ matrix.component.name }} image
+      - name: Build ${{ matrix.name }}
         run: |
-          IMAGE=${{ matrix.component.name }}
-          docker build -t $IMAGE:local ./${{ matrix.component.path }}
+          docker build -t ${{ matrix.name }}:local ./${{ matrix.path }}
 
-      - name: Smoke run ${{ matrix.component.name }}
-        run: |
-          docker run --rm ${{ matrix.component.name }}:local
+      - name: Smoke ${{ matrix.name }}
+        run: docker run --rm ${{ matrix.name }}:local
 
-      # ====== (Opcional) Push a Artifact Registry con OIDC ======
-      # Rellena PROJECT_ID arriba y configura Workload Identity Federation
-      # Secrets requeridos: nada (OIDC). Solo permisos "id-token: write".
-      - name: Auth to Google Cloud (OIDC)
-        if: env.PROJECT_ID != ''
+      # --- Push a Artifact Registry (usa OIDC) ---
+      - name: Auth to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -52,22 +85,19 @@ jobs:
           token_format: 'access_token'
 
       - name: Setup gcloud
-        if: env.PROJECT_ID != ''
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure Docker to Artifact Registry
-        if: env.PROJECT_ID != ''
-        run: |
-          gcloud auth configure-docker ${{ env.AR_LOC }}-docker.pkg.dev --quiet
+      - name: Docker login to Artifact Registry
+        run: gcloud auth configure-docker ${{ env.AR_LOC }}-docker.pkg.dev --quiet
 
-      - name: Tag & Push ${{ matrix.component.name }}
-        if: env.PROJECT_ID != ''
+      - name: Tag & Push ${{ matrix.name }}
         run: |
-          COMMIT=${{ github.sha }}
           REG=${{ env.AR_LOC }}-docker.pkg.dev
-          REPO=${{ env.PROJECT_ID }}/${{ matrix.component.repo }}
-          IMG=${{ matrix.component.name }}
-          docker tag $IMG:local $REG/$REPO/$IMG:$COMMIT
+          REPO=${{ env.PROJECT_ID }}/${{ matrix.repo }}
+          IMG=${{ matrix.name }}
+          SHA=${{ github.sha }}
+
+          docker tag $IMG:local $REG/$REPO/$IMG:$SHA
           docker tag $IMG:local $REG/$REPO/$IMG:latest
-          docker push $REG/$REPO/$IMG:$COMMIT
+          docker push $REG/$REPO/$IMG:$SHA
           docker push $REG/$REPO/$IMG:latest
