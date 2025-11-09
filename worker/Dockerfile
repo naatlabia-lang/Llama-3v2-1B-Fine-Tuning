@@ -1,33 +1,9 @@
-# --- Base mínima ---
 FROM python:3.11-slim
-
-ARG TORCH_DEVICE=cpu   # cpu | cu121
-ENV PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
-
-# Dependencias de sistema básicas
+ENV PYTHONUNBUFFERED=1 GLOG_logtostderr=1 PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Librerías de Python (sin torch)
-COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
-
-# Instalar PyTorch según dispositivo
-# Versiones alineadas: torch/torchaudio 2.4.1, torchvision 0.19.1
-RUN if [ "$TORCH_DEVICE" = "cpu" ]; then \
-      pip install --extra-index-url https://download.pytorch.org/whl/cpu \
-        torch==2.4.1+cpu torchvision==0.19.1+cpu torchaudio==2.4.1+cpu ; \
-    elif [ "$TORCH_DEVICE" = "cu121" ]; then \
-      pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
-        torch==2.4.1+cu121 torchvision==0.19.1+cu121 torchaudio==2.4.1+cu121 ; \
-    else \
-      echo "Valor TORCH_DEVICE inválido (usa cpu|cu121)"; exit 1; \
-    fi
-
-# App demo
-COPY src/ /app/
-CMD ["python", "main.py"]
+    git curl ca-certificates libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+COPY requirements-worker-cpu.txt /tmp/requirements.txt
+RUN pip install -U pip && pip install -r /tmp/requirements.txt
+COPY logging_setup /opt/logging_setup
+ENV PYTHONPATH="/opt:${PYTHONPATH}"
+CMD ["python","-c","import torch;import ray;print('Torch', torch.__version__)"]
