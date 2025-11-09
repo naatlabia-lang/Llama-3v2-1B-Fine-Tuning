@@ -39,14 +39,14 @@ RUNTIME_NAME="nb-ray-client"
 # Limpieza previa
 CLEAN_SLATE=true    # ← pon false si no quieres borrar
 DRYRUN=false        # ← true = sólo mostrar comandos
-SKIP_WIF_DELETE=${SKIP_WIF_DELETE:-false}  # export SKIP_WIF_DELETE=true para saltar WIF en limpieza
+SKIP_WIF_DELETE=${SKIP_WIF_DELETE:-false}  # export SKIP_WIF_DELETE=true para saltar WIF
 
 # ===================== HELPERS =====================
 cecho(){ echo -e "\033[1;36m==>\033[0m $*"; }
 wecho(){ echo -e "\033[1;33m[SKIP]\033[0m $*"; }
 eecho(){ echo -e "\033[1;31m[ERR]\033[0m $*"; }
 doit(){ if [[ "$DRYRUN" == "true" ]]; then echo "+ $*"; else eval "$@"; fi; }
-exists(){ eval "$1" >/dev/null 2>&1; }
+exists(){ eval "$1" >/dev/null 2>&1; } # exists "gcloud ... describe ..."
 
 wait_sa(){
   local EMAIL="$1"
@@ -67,11 +67,11 @@ RUNTIME_SA_EMAIL="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 if [[ "$CLEAN_SLATE" == "true" ]]; then
   cecho "CLEAN_SLATE=true  DRYRUN=$DRYRUN — iniciando borrado seguro (con validación)…"
 
-  # 1) Workbench Runtime
-  cecho "Borrando Workbench runtime (si existe)…"
-  if exists "gcloud notebooks runtimes describe '$RUNTIME_NAME' --location='$ZONE'"; then
-    doit gcloud notebooks runtimes delete "$RUNTIME_NAME" --location="$ZONE" --quiet
-  else wecho "Runtime no existe: $RUNTIME_NAME"; fi
+  # 1) Workbench Runtime (instance)
+  cecho "Borrando Workbench instance (si existe)…"
+  if exists "gcloud notebooks instances describe '$RUNTIME_NAME' --location='$ZONE'"; then
+    doit gcloud notebooks instances delete "$RUNTIME_NAME" --location="$ZONE" --quiet
+  else wecho "Instance no existe: $RUNTIME_NAME"; fi
 
   # 2) Pub/Sub
   cecho "Borrando Pub/Sub…"
@@ -112,7 +112,7 @@ if [[ "$CLEAN_SLATE" == "true" ]]; then
     else wecho "Repo AR no existe: $REPO ($AR_LOC)"; fi
   done
 
-  # 6) WIF Provider y Pool (ultra-robusto y silencioso, opcional)
+  # 6) WIF Provider y Pool (ultra-robusto y silencioso)
   cecho "Borrando WIF provider/pool… (SKIP_WIF_DELETE=$SKIP_WIF_DELETE)"
   if [[ "$SKIP_WIF_DELETE" == "true" ]]; then
     wecho "Saltando borrado de WIF por bandera."
@@ -131,7 +131,6 @@ if [[ "$CLEAN_SLATE" == "true" ]]; then
         wecho "WIF provider no existe: $WIP_PROVIDER_NAME"
       fi
 
-      # Verifica de nuevo antes de borrar el pool
       if gcloud iam workload-identity-pools describe "$WIP_NAME" --location=global >/dev/null 2>&1; then
         doit gcloud iam workload-identity-pools delete "$WIP_NAME" \
           --location=global --quiet >/dev/null 2>&1 || \
@@ -193,7 +192,7 @@ gcloud iam service-accounts create "$RUNTIME_SA_ID" --display-name="Notebook Run
 wait_sa "$RUNTIME_SA_EMAIL"
 for ROLE in roles/aiplatform.user roles/artifactregistry.reader roles/storage.objectAdmin roles/logging.logWriter roles/monitoring.metricWriter; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${RUNTIME_SA_EMAIL}" --role="$ROLE" >/devnull 2>&1 || true
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" --role="$ROLE" >/dev/null 2>&1 || true
 done
 
 # ===================== WIF POR REPO (con retry/perm checks) =====================
@@ -284,15 +283,14 @@ exists "bq --project_id='$PROJECT_ID' show --format=none '$BQ_DATASET'" || doit 
 cecho "Creando Vertex staging bucket…"
 gsutil ls -b "${VERTEX_STAGING_BUCKET}" >/dev/null 2>&1 || doit gsutil mb -l "$REGION" "${VERTEX_STAGING_BUCKET}"
 
-# ===================== (OPCIONAL) RUNTIME WORKBENCH =====================
-cecho "Creando Workbench Managed Runtime (sin EUC)…"
-exists "gcloud notebooks runtimes describe '$RUNTIME_NAME' --location='$ZONE'" || \
-  doit gcloud notebooks runtimes create "$RUNTIME_NAME" \
+# ===================== (OPCIONAL) WORKBENCH INSTANCE (cliente) =====================
+cecho "Creando Workbench Instance (cliente, sin EUC)…"
+exists "gcloud notebooks instances describe '$RUNTIME_NAME' --location='$ZONE'" || \
+  doit gcloud notebooks instances create "$RUNTIME_NAME" \
     --location="$ZONE" \
-    --runtime-type=managed \
-    --machine-type=n2-standard-8 \
     --vm-image-project=deeplearning-platform-release \
     --vm-image-family=common-cpu-notebooks \
+    --machine-type=n2-standard-8 \
     --service-account="${RUNTIME_SA_EMAIL}" \
     --boot-disk-size=100GB
 
@@ -322,7 +320,7 @@ Vertex AI:
   STAGING_BUCKET     = ${VERTEX_STAGING_BUCKET}
   Región             = ${REGION}
 
-Workbench Runtime (cliente):
+Workbench Instance (cliente):
   NAME               = ${RUNTIME_NAME}
   ZONE               = ${ZONE}
   SERVICE_ACCOUNT    = ${RUNTIME_SA_EMAIL}
@@ -338,3 +336,7 @@ Push ejemplo:
   docker push ${AR_LOC}-docker.pkg.dev/${PROJECT_ID}/${JOB_REPO}/job:dev
 -------------------------------------------------------------------
 EOF
+
+
+
+
