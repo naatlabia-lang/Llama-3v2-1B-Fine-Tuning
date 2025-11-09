@@ -5,6 +5,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements-job.txt /tmp/requirements.txt
 RUN pip install -U pip && pip install -r /tmp/requirements.txt
 # Logging helper (opcional)
-COPY logging_setup /opt/logging_setup
+COPY loggin /opt/loggin
 ENV PYTHONPATH="/opt:${PYTHONPATH}"
 CMD ["python","-c","import ray; print('Ray', ray.__version__)"]
