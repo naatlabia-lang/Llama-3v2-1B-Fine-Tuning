@@ -336,7 +336,3 @@ Push ejemplo:
   docker push ${AR_LOC}-docker.pkg.dev/${PROJECT_ID}/${JOB_REPO}/job:dev
 -------------------------------------------------------------------
 EOF
-
-
-
-
