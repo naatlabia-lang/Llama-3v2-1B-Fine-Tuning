@@ -292,7 +292,9 @@ exists "gcloud notebooks instances describe '$RUNTIME_NAME' --location='$ZONE'" 
     --vm-image-family=common-cpu-notebooks \
     --machine-type=n2-standard-8 \
     --service-account="${RUNTIME_SA_EMAIL}" \
-    --boot-disk-size=100GB
+    --boot-disk-size=100 \
+    --boot-disk-type=pd-ssd \
+    --no-public-ip
 
 # ===================== OUTPUTS =====================
 cat <<EOF
