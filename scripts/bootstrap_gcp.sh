@@ -219,7 +219,7 @@ else
     --display-name="$WIP_PROVIDER_NAME" \
     --issuer-uri="$OIDC_ISSUER_URI" \
     --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-    --attribute-condition="assertion.repository=='${GH_ORG}/${GH_REPO}'" >/dev/null 2>&1 || PROV_OK=false
+    --attribute-condition="attribute.repository=='${GH_ORG}/${GH_REPO}'" >/dev/null 2>&1 || PROV_OK=false
 
   # 3) Espera a que el provider exista (propagación IAM)
   if [[ "$PROV_OK" == "true" ]]; then
@@ -255,7 +255,6 @@ else
     fi
   fi
 fi
-
 # ===================== ARTIFACT REGISTRY =====================
 cecho "Creando repos de Artifact Registry (regional: $AR_LOC)…"
 for REPO in "$WORKER_REPO" "$JOB_REPO"; do
