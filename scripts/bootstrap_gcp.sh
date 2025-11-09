@@ -201,6 +201,8 @@ cecho "Configurando WIF (por repo)…"
 POOL_OK=true
 PROV_OK=true
 
+COND="attribute.repository=='${GH_ORG}/${GH_REPO}'"
+
 # 1) Pool (create if missing)
 gcloud iam workload-identity-pools describe "$WIP_NAME" --location=global >/dev/null 2>&1 || \
 gcloud iam workload-identity-pools create "$WIP_NAME" \
@@ -210,16 +212,42 @@ if [[ "$POOL_OK" != "true" ]]; then
   eecho "No pude crear/ver el pool '$WIP_NAME'. ¿Tienes roles/iam.workloadIdentityPoolAdmin?"
   wecho "Salto configuración WIF; puedes reintentar luego."
 else
-  # 2) Provider (create if missing)
-  gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
-    --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1 || \
-  gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER_NAME" \
-    --workload-identity-pool="$WIP_NAME" \
-    --location=global \
-    --display-name="$WIP_PROVIDER_NAME" \
-    --issuer-uri="$OIDC_ISSUER_URI" \
-    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-    --attribute-condition="attribute.repository=='${GH_ORG}/${GH_REPO}'" >/dev/null 2>&1 || PROV_OK=false
+  # 2) Provider (create if missing) con fallback
+  if ! gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
+        --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1; then
+
+    cecho "Creando provider '$WIP_PROVIDER_NAME' con condición (${COND})…"
+    set +e
+    gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER_NAME" \
+      --workload-identity-pool="$WIP_NAME" \
+      --location=global \
+      --display-name="$WIP_PROVIDER_NAME" \
+      --issuer-uri="$OIDC_ISSUER_URI" \
+      --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
+      --attribute-condition="${COND}"
+    CREATE_RC=$?
+    set -e
+
+    if [[ "$CREATE_RC" -ne 0 ]]; then
+      wecho "Falló crear con condición; probando crear SIN condición…"
+      gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER_NAME" \
+        --workload-identity-pool="$WIP_NAME" \
+        --location=global \
+        --display-name="$WIP_PROVIDER_NAME" \
+        --issuer-uri="$OIDC_ISSUER_URI" \
+        --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
+      || PROV_OK=false
+
+      if [[ "$PROV_OK" == "true" ]]; then
+        cecho "Provider creado sin condición; aplicando condición (${COND})…"
+        gcloud iam workload-identity-pools providers update-oidc "$WIP_PROVIDER_NAME" \
+          --workload-identity-pool="$WIP_NAME" \
+          --location=global \
+          --attribute-condition="${COND}" \
+        || PROV_OK=false
+      fi
+    fi
+  fi
 
   # 3) Espera a que el provider exista (propagación IAM)
   if [[ "$PROV_OK" == "true" ]]; then
@@ -255,6 +283,7 @@ else
     fi
   fi
 fi
+
 # ===================== ARTIFACT REGISTRY =====================
 cecho "Creando repos de Artifact Registry (regional: $AR_LOC)…"
 for REPO in "$WORKER_REPO" "$JOB_REPO"; do
