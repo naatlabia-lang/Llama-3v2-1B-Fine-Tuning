@@ -39,6 +39,7 @@ RUNTIME_NAME="nb-ray-client"
 # Limpieza previa
 CLEAN_SLATE=true    # ← pon false si no quieres borrar
 DRYRUN=false        # ← true = sólo mostrar comandos
+SKIP_WIF_DELETE=${SKIP_WIF_DELETE:-false}  # export SKIP_WIF_DELETE=true para saltar WIF
 
 # ===================== HELPERS =====================
 cecho(){ echo -e "\033[1;36m==>\033[0m $*"; }
@@ -90,54 +91,64 @@ if [[ "$CLEAN_SLATE" == "true" ]]; then
   # 4) Buckets GCS
   cecho "Borrando buckets GCS…"
   if gsutil ls -b "gs://${BUCKET_NAME}" >/dev/null 2>&1; then
-    doit gsutil -m rm -r "gs://${BUCKET_NAME}" || true
+    doit gsutil -m rm -r "gs://${BUCKET_NAME}" >/dev/null 2>&1 || true
   else wecho "Bucket no existe: gs://${BUCKET_NAME}"; fi
   if gsutil ls -b "${VERTEX_STAGING_BUCKET}" >/dev/null 2>&1; then
-    doit gsutil -m rm -r "${VERTEX_STAGING_BUCKET}" || true
+    doit gsutil -m rm -r "${VERTEX_STAGING_BUCKET}" >/dev/null 2>&1 || true
   else wecho "Bucket no existe: ${VERTEX_STAGING_BUCKET}"; fi
 
   # 5) Artifact Registry repos
   cecho "Borrando repos de Artifact Registry…"
   for REPO in "$WORKER_REPO" "$JOB_REPO"; do
     if exists "gcloud artifacts repositories describe '$REPO' --location='$AR_LOC'"; then
-      IMAGES=$(gcloud artifacts docker images list "$AR_LOC-docker.pkg.dev/$PROJECT_ID/$REPO" --format="value(IMAGE)" 2>/dev/null || true)
+      IMAGES="$(gcloud artifacts docker images list "$AR_LOC-docker.pkg.dev/$PROJECT_ID/$REPO" --format="value(IMAGE)" 2>/dev/null || true)"
       if [[ -n "${IMAGES}" ]]; then
         while read -r IMG; do
           [[ -z "$IMG" ]] && continue
-          doit gcloud artifacts docker images delete "$IMG" --delete-tags --quiet || true
+          doit gcloud artifacts docker images delete "$IMG" --delete-tags --quiet >/dev/null 2>&1 || true
         done <<< "$IMAGES"
       fi
-      doit gcloud artifacts repositories delete "$REPO" --location="$AR_LOC" --quiet || true
+      doit gcloud artifacts repositories delete "$REPO" --location="$AR_LOC" --quiet >/dev/null 2>&1 || true
     else wecho "Repo AR no existe: $REPO ($AR_LOC)"; fi
   done
 
-  # 6) WIF Provider y Pool (borrado robusto)
-  cecho "Borrando WIF provider/pool…"
-  ACTIVE_PROJECT="$(gcloud config get-value project)"
-  ACTIVE_ACCOUNT="$(gcloud config get-value account)"
-  cecho "Proyecto activo: ${ACTIVE_PROJECT} | Cuenta activa: ${ACTIVE_ACCOUNT}"
-
-  if gcloud iam workload-identity-pools describe "$WIP_NAME" --location=global >/dev/null 2>&1; then
-    if gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
-         --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1; then
-      doit gcloud iam workload-identity-pools providers delete "$WIP_PROVIDER_NAME" \
-        --workload-identity-pool="$WIP_NAME" --location=global --quiet || \
-        wecho "No se pudo borrar provider (permiso/fallo benigno): $WIP_PROVIDER_NAME"
-    else
-      wecho "WIF provider no existe: $WIP_PROVIDER_NAME"
-    fi
-    doit gcloud iam workload-identity-pools delete "$WIP_NAME" \
-      --location=global --quiet || wecho "No se pudo borrar pool (permiso o providers restantes): $WIP_NAME"
+  # 6) WIF Provider y Pool (ultra-robusto y silencioso)
+  cecho "Borrando WIF provider/pool… (SKIP_WIF_DELETE=$SKIP_WIF_DELETE)"
+  if [[ "$SKIP_WIF_DELETE" == "true" ]]; then
+    wecho "Saltando borrado de WIF por bandera."
   else
-    wecho "WIF pool no existe o no es visible (permiso insuficiente): $WIP_NAME"
-    wecho "Si crees que existe, otorga roles/iam.workloadIdentityPoolAdmin a ${ACTIVE_ACCOUNT}"
+    ACTIVE_PROJECT="$(gcloud config get-value project)"
+    ACTIVE_ACCOUNT="$(gcloud config get-value account)"
+    cecho "Proyecto activo: ${ACTIVE_PROJECT} | Cuenta activa: ${ACTIVE_ACCOUNT}"
+
+    if gcloud iam workload-identity-pools describe "$WIP_NAME" --location=global >/dev/null 2>&1; then
+      if gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
+           --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1; then
+        doit gcloud iam workload-identity-pools providers delete "$WIP_PROVIDER_NAME" \
+          --workload-identity-pool="$WIP_NAME" --location=global --quiet >/dev/null 2>&1 || \
+          wecho "No se pudo borrar provider (permiso/fallo benigno): $WIP_PROVIDER_NAME"
+      else
+        wecho "WIF provider no existe: $WIP_PROVIDER_NAME"
+      fi
+
+      # Verifica de nuevo antes de borrar el pool
+      if gcloud iam workload-identity-pools describe "$WIP_NAME" --location=global >/dev/null 2>&1; then
+        doit gcloud iam workload-identity-pools delete "$WIP_NAME" \
+          --location=global --quiet >/dev/null 2>&1 || \
+          wecho "No se pudo borrar pool (no existe o sin permiso): $WIP_NAME"
+      else
+        wecho "WIF pool ya no existe tras borrar provider: $WIP_NAME"
+      fi
+    else
+      wecho "WIF pool no existe o no es visible (NOT_FOUND). Continuando…"
+    fi
   fi
 
   # 7) Service Accounts
   cecho "Borrando Service Accounts…"
   for SA in "$RUNTIME_SA_EMAIL" "$VERTEX_SA_EMAIL" "$SA_EMAIL"; do
     if exists "gcloud iam service-accounts describe '$SA'"; then
-      doit gcloud iam service-accounts delete "$SA" --quiet
+      doit gcloud iam service-accounts delete "$SA" --quiet >/dev/null 2>&1 || true
     else wecho "SA no existe: $SA"; fi
   done
 fi
@@ -160,35 +171,35 @@ gcloud services enable \
 
 # ===================== CREATE SAs =====================
 cecho "Creando SA de CI…"
-gcloud iam service-accounts create "$SA_ID" --display-name="$SA_DISPLAY" || true
+gcloud iam service-accounts create "$SA_ID" --display-name="$SA_DISPLAY" >/dev/null 2>&1 || true
 wait_sa "$SA_EMAIL"
 
 cecho "Roles para SA de CI…"
 for ROLE in roles/artifactregistry.writer roles/storage.admin roles/pubsub.editor roles/bigquery.dataEditor roles/bigquery.jobUser; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${SA_EMAIL}" --role="$ROLE" || true
+    --member="serviceAccount:${SA_EMAIL}" --role="$ROLE" >/dev/null 2>&1 || true
 done
 
 cecho "Creando Vertex runner SA…"
-gcloud iam service-accounts create "$VERTEX_SA_ID" --display-name="Vertex AI Runner" || true
+gcloud iam service-accounts create "$VERTEX_SA_ID" --display-name="Vertex AI Runner" >/dev/null 2>&1 || true
 wait_sa "$VERTEX_SA_EMAIL"
 for ROLE in roles/artifactregistry.reader roles/storage.objectAdmin roles/logging.logWriter roles/monitoring.metricWriter roles/aiplatform.user; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="$ROLE" || true
+    --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="$ROLE" >/dev/null 2>&1 || true
 done
 
 cecho "Creando Runtime (Notebook) SA…"
-gcloud iam service-accounts create "$RUNTIME_SA_ID" --display-name="Notebook Runner" || true
+gcloud iam service-accounts create "$RUNTIME_SA_ID" --display-name="Notebook Runner" >/dev/null 2>&1 || true
 wait_sa "$RUNTIME_SA_EMAIL"
 for ROLE in roles/aiplatform.user roles/artifactregistry.reader roles/storage.objectAdmin roles/logging.logWriter roles/monitoring.metricWriter; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${RUNTIME_SA_EMAIL}" --role="$ROLE" || true
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" --role="$ROLE" >/dev/null 2>&1 || true
 done
 
 # ===================== WIF POR REPO =====================
 cecho "Configurando WIF (por repo)…"
 gcloud iam workload-identity-pools create "$WIP_NAME" \
-  --location=global --display-name="$WIP_NAME" || true
+  --location=global --display-name="$WIP_NAME" >/dev/null 2>&1 || true
 
 gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER_NAME" \
   --workload-identity-pool="$WIP_NAME" \
@@ -196,14 +207,14 @@ gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER_NAME" \
   --display-name="$WIP_PROVIDER_NAME" \
   --issuer-uri="$OIDC_ISSUER_URI" \
   --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-  --attribute-condition="assertion.repository=='${GH_ORG}/${GH_REPO}'" || true
+  --attribute-condition="assertion.repository=='${GH_ORG}/${GH_REPO}'" >/dev/null 2>&1 || true
 
 PROVIDER_FQN="$(gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
   --workload-identity-pool="$WIP_NAME" --location=global --format='value(name)')"
 
 gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
   --role="roles/iam.workloadIdentityUser" \
-  --member="principalSet://iam.googleapis.com/${PROVIDER_FQN}/attribute.repository/${GH_ORG}/${GH_REPO}" || true
+  --member="principalSet://iam.googleapis.com/${PROVIDER_FQN}/attribute.repository/${GH_ORG}/${GH_REPO}" >/dev/null 2>&1 || true
 
 # ===================== ARTIFACT REGISTRY =====================
 cecho "Creando repos de Artifact Registry (regional: $AR_LOC)…"
@@ -211,7 +222,7 @@ for REPO in "$WORKER_REPO" "$JOB_REPO"; do
   gcloud artifacts repositories describe "$REPO" --location="$AR_LOC" >/dev/null 2>&1 || \
     gcloud artifacts repositories create "$REPO" \
       --repository-format="$AR_FORMAT" --location="$AR_LOC" \
-      --description="Repo for ${REPO} images"
+      --description="Repo for ${REPO} images" >/dev/null 2>&1
 done
 
 # ===================== STORAGE / PUBSUB / BQ =====================
