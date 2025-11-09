@@ -100,7 +100,6 @@ if [[ "$CLEAN_SLATE" == "true" ]]; then
   cecho "Borrando repos de Artifact Registry…"
   for REPO in "$WORKER_REPO" "$JOB_REPO"; do
     if exists "gcloud artifacts repositories describe '$REPO' --location='$AR_LOC'"; then
-      # Borrar imágenes (si hay)
       IMAGES=$(gcloud artifacts docker images list "$AR_LOC-docker.pkg.dev/$PROJECT_ID/$REPO" --format="value(IMAGE)" 2>/dev/null || true)
       if [[ -n "${IMAGES}" ]]; then
         while read -r IMG; do
@@ -112,15 +111,27 @@ if [[ "$CLEAN_SLATE" == "true" ]]; then
     else wecho "Repo AR no existe: $REPO ($AR_LOC)"; fi
   done
 
-  # 6) WIF Provider y Pool
+  # 6) WIF Provider y Pool (borrado robusto)
   cecho "Borrando WIF provider/pool…"
-  if exists "gcloud iam workload-identity-pools providers describe '$WIP_PROVIDER_NAME' --workload-identity-pool='$WIP_NAME' --location=global"; then
-    doit gcloud iam workload-identity-pools providers delete "$WIP_PROVIDER_NAME" \
-      --workload-identity-pool="$WIP_NAME" --location=global --quiet
-  else wecho "WIF provider no existe: $WIP_PROVIDER_NAME"; fi
-  if exists "gcloud iam workload-identity-pools describe '$WIP_NAME' --location=global"; then
-    doit gcloud iam workload-identity-pools delete "$WIP_NAME" --location=global --quiet
-  else wecho "WIF pool no existe: $WIP_NAME"; fi
+  ACTIVE_PROJECT="$(gcloud config get-value project)"
+  ACTIVE_ACCOUNT="$(gcloud config get-value account)"
+  cecho "Proyecto activo: ${ACTIVE_PROJECT} | Cuenta activa: ${ACTIVE_ACCOUNT}"
+
+  if gcloud iam workload-identity-pools describe "$WIP_NAME" --location=global >/dev/null 2>&1; then
+    if gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
+         --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1; then
+      doit gcloud iam workload-identity-pools providers delete "$WIP_PROVIDER_NAME" \
+        --workload-identity-pool="$WIP_NAME" --location=global --quiet || \
+        wecho "No se pudo borrar provider (permiso/fallo benigno): $WIP_PROVIDER_NAME"
+    else
+      wecho "WIF provider no existe: $WIP_PROVIDER_NAME"
+    fi
+    doit gcloud iam workload-identity-pools delete "$WIP_NAME" \
+      --location=global --quiet || wecho "No se pudo borrar pool (permiso o providers restantes): $WIP_NAME"
+  else
+    wecho "WIF pool no existe o no es visible (permiso insuficiente): $WIP_NAME"
+    wecho "Si crees que existe, otorga roles/iam.workloadIdentityPoolAdmin a ${ACTIVE_ACCOUNT}"
+  fi
 
   # 7) Service Accounts
   cecho "Borrando Service Accounts…"
