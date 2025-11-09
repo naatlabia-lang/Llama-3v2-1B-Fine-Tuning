@@ -39,14 +39,14 @@ RUNTIME_NAME="nb-ray-client"
 # Limpieza previa
 CLEAN_SLATE=true    # ← pon false si no quieres borrar
 DRYRUN=false        # ← true = sólo mostrar comandos
-SKIP_WIF_DELETE=${SKIP_WIF_DELETE:-false}  # export SKIP_WIF_DELETE=true para saltar WIF
+SKIP_WIF_DELETE=${SKIP_WIF_DELETE:-false}  # export SKIP_WIF_DELETE=true para saltar WIF en limpieza
 
 # ===================== HELPERS =====================
 cecho(){ echo -e "\033[1;36m==>\033[0m $*"; }
 wecho(){ echo -e "\033[1;33m[SKIP]\033[0m $*"; }
 eecho(){ echo -e "\033[1;31m[ERR]\033[0m $*"; }
 doit(){ if [[ "$DRYRUN" == "true" ]]; then echo "+ $*"; else eval "$@"; fi; }
-exists(){ eval "$1" >/dev/null 2>&1; } # exists "gcloud ... describe ..."
+exists(){ eval "$1" >/dev/null 2>&1; }
 
 wait_sa(){
   local EMAIL="$1"
@@ -112,7 +112,7 @@ if [[ "$CLEAN_SLATE" == "true" ]]; then
     else wecho "Repo AR no existe: $REPO ($AR_LOC)"; fi
   done
 
-  # 6) WIF Provider y Pool (ultra-robusto y silencioso)
+  # 6) WIF Provider y Pool (ultra-robusto y silencioso, opcional)
   cecho "Borrando WIF provider/pool… (SKIP_WIF_DELETE=$SKIP_WIF_DELETE)"
   if [[ "$SKIP_WIF_DELETE" == "true" ]]; then
     wecho "Saltando borrado de WIF por bandera."
@@ -193,28 +193,69 @@ gcloud iam service-accounts create "$RUNTIME_SA_ID" --display-name="Notebook Run
 wait_sa "$RUNTIME_SA_EMAIL"
 for ROLE in roles/aiplatform.user roles/artifactregistry.reader roles/storage.objectAdmin roles/logging.logWriter roles/monitoring.metricWriter; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${RUNTIME_SA_EMAIL}" --role="$ROLE" >/dev/null 2>&1 || true
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" --role="$ROLE" >/devnull 2>&1 || true
 done
 
-# ===================== WIF POR REPO =====================
+# ===================== WIF POR REPO (con retry/perm checks) =====================
 cecho "Configurando WIF (por repo)…"
+
+POOL_OK=true
+PROV_OK=true
+
+# 1) Pool (create if missing)
+gcloud iam workload-identity-pools describe "$WIP_NAME" --location=global >/dev/null 2>&1 || \
 gcloud iam workload-identity-pools create "$WIP_NAME" \
-  --location=global --display-name="$WIP_NAME" >/dev/null 2>&1 || true
+  --location=global --display-name="$WIP_NAME" >/dev/null 2>&1 || POOL_OK=false
 
-gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER_NAME" \
-  --workload-identity-pool="$WIP_NAME" \
-  --location=global \
-  --display-name="$WIP_PROVIDER_NAME" \
-  --issuer-uri="$OIDC_ISSUER_URI" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-  --attribute-condition="assertion.repository=='${GH_ORG}/${GH_REPO}'" >/dev/null 2>&1 || true
+if [[ "$POOL_OK" != "true" ]]; then
+  eecho "No pude crear/ver el pool '$WIP_NAME'. ¿Tienes roles/iam.workloadIdentityPoolAdmin?"
+  wecho "Salto configuración WIF; puedes reintentar luego."
+else
+  # 2) Provider (create if missing)
+  gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
+    --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1 || \
+  gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER_NAME" \
+    --workload-identity-pool="$WIP_NAME" \
+    --location=global \
+    --display-name="$WIP_PROVIDER_NAME" \
+    --issuer-uri="$OIDC_ISSUER_URI" \
+    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
+    --attribute-condition="assertion.repository=='${GH_ORG}/${GH_REPO}'" >/dev/null 2>&1 || PROV_OK=false
 
-PROVIDER_FQN="$(gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
-  --workload-identity-pool="$WIP_NAME" --location=global --format='value(name)')"
+  # 3) Espera a que el provider exista (propagación IAM)
+  if [[ "$PROV_OK" == "true" ]]; then
+    for _ in {1..60}; do
+      if gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
+           --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    if ! gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
+         --workload-identity-pool="$WIP_NAME" --location=global >/dev/null 2>&1; then
+      PROV_OK=false
+    fi
+  fi
 
-gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
-  --role="roles/iam.workloadIdentityUser" \
-  --member="principalSet://iam.googleapis.com/${PROVIDER_FQN}/attribute.repository/${GH_ORG}/${GH_REPO}" >/dev/null 2>&1 || true
+  if [[ "$PROV_OK" != "true" ]]; then
+    eecho "No pude crear/ver el provider '$WIP_PROVIDER_NAME' en el pool '$WIP_NAME'."
+    eecho "Verifica permisos: roles/iam.workloadIdentityPoolAdmin para la cuenta $(gcloud config get-value account)."
+    eecho "Confirma repo objetivo: ${GH_ORG}/${GH_REPO}"
+  else
+    # 4) FQN y binding a la SA de CI
+    PROVIDER_FQN="$(gcloud iam workload-identity-pools providers describe "$WIP_PROVIDER_NAME" \
+      --workload-identity-pool="$WIP_NAME" --location=global --format='value(name)')"
+
+    if [[ -z "${PROVIDER_FQN}" ]]; then
+      eecho "No obtuve PROVIDER_FQN, salto el binding. Reintenta luego."
+    else
+      gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+        --role="roles/iam.workloadIdentityUser" \
+        --member="principalSet://iam.googleapis.com/${PROVIDER_FQN}/attribute.repository/${GH_ORG}/${GH_REPO}" >/dev/null 2>&1 || \
+        wecho "No pude bindear WorkloadIdentityUser (permiso insuficiente)."
+    fi
+  fi
+fi
 
 # ===================== ARTIFACT REGISTRY =====================
 cecho "Creando repos de Artifact Registry (regional: $AR_LOC)…"
