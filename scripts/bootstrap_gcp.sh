@@ -177,6 +177,108 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/aiplatform.user" >/dev/null || true
 
+# ===== Permisos finos =====
+# Cambia a "train_and_serve" si también vas a crear Model/Endpoint y desplegar online.
+PERM_PRESET="${PERM_PRESET:-train_only}"
+
+echo "==> Asignando permisos finos…"
+
+# --- Artifact Registry: writer por repositorio (no a nivel proyecto) ---
+for REPO in "$WORKER_REPO" "$JOB_REPO"; do
+  gcloud artifacts repositories add-iam-policy-binding "$REPO" \
+    --location="$AR_LOC" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/artifactregistry.writer" \
+    --project="$PROJECT_ID" >/dev/null || true
+done
+
+# --- GCS: CI solo al bucket de app; Runner solo a staging de Vertex ---
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/storage.objectAdmin" >/dev/null || true
+
+gcloud storage buckets add-iam-policy-binding "${VERTEX_STAGING_BUCKET}" \
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+  --role="roles/storage.objectAdmin" >/dev/null || true
+
+# --- Pub/Sub: permisos por recurso ---
+gcloud pubsub topics add-iam-policy-binding "$PUBSUB_TOPIC" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/pubsub.publisher" \
+  --project="$PROJECT_ID" >/dev/null || true
+
+gcloud pubsub subscriptions add-iam-policy-binding "$PUBSUB_SUB" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/pubsub.subscriber" \
+  --project="$PROJECT_ID" >/dev/null || true
+
+# --- BigQuery: dataEditor solo sobre el dataset (no a nivel proyecto) ---
+# Nota: 'bq add-iam-policy-binding' es idempotente y aplica IAM del dataset.
+bq --project_id="$PROJECT_ID" add-iam-policy-binding "$BQ_DATASET" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/bigquery.dataEditor" >/dev/null || true
+
+# jobUser puede quedarse a nivel proyecto (requerido para lanzar jobs de BQ)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/bigquery.jobUser" >/dev/null || true
+
+# --- Logging/Monitoring básicos (si vas a escribir logs desde CI/Runner) ---
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/logging.logWriter" >/dev/null || true
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+  --role="roles/logging.logWriter" >/dev/null || true
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+  --role="roles/monitoring.metricWriter" >/dev/null || true
+
+# --- Vertex AI: mínimos + opción para servir online ---
+# Runner ejecuta entrenamientos/Batch Prediction.
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+  --role="roles/aiplatform.user" >/dev/null || true
+
+# (Opcional) Para crear Jobs que lean/escriban en AR (pull de imagen del job):
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+  --role="roles/artifactregistry.reader" >/dev/null || true
+
+# Si además vas a hacer Model.upload / Endpoint.create / DeployModel:
+if [[ "$PERM_PRESET" == "train_and_serve" ]]; then
+  # Puedes usar 'aiplatform.admin' (más amplio) o granular:
+  # Granular recomendado:
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+    --role="roles/aiplatform.modelUploader" >/dev/null || true
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+    --role="roles/aiplatform.endpointAdmin" >/dev/null || true
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${VERTEX_SA_EMAIL}" \
+    --role="roles/aiplatform.deploymentResourceEditor" >/dev/null || true
+fi
+
+# --- Impersonación controlada: CI puede usar la Runner SA sin llaves ---
+# (Necesario si el pipeline de CI lanza CustomJobs en Vertex impersonando la runner)
+gcloud iam service-accounts add-iam-policy-binding "$VERTEX_SA_EMAIL" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/iam.serviceAccountUser" \
+  --project="$PROJECT_ID" >/dev/null || true
+
+# --- Limpiar heredados a nivel proyecto (si los tenías arriba) ---
+# (opcional) Puedes retirar roles a nivel proyecto que ya afinaste por recurso:
+# gcloud projects remove-iam-policy-binding "$PROJECT_ID" \
+#   --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectAdmin"
+# gcloud projects remove-iam-policy-binding "$PROJECT_ID" \
+#   --member="serviceAccount:${SA_EMAIL}" --role="roles/artifactregistry.writer"
+# … etc. (hazlo solo si estás seguro de no romper otros flujos)
+
+echo "==> Permisos finos aplicados (preset: ${PERM_PRESET})"
+
+  
+
 # --------- Salidas útiles ----------
 echo
 echo "==================== INFO PARA GITHUB ACTIONS ===================="
