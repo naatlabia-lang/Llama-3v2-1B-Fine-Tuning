@@ -25,8 +25,8 @@ BQ_LOC="US"
 # CI (GitHub Actions) - SA y WIF
 SA_ID="wrkjob-ci"
 SA_DISPLAY="CI for worker+job"
-WIP_ID_SHORT="wrkjob-pool"        # ID del pool
-PROVIDER_ID="github"              # ID del provider
+WIP_ID_SHORT="wrkjob-pool"        # ID del pool (estable, sin espacios)
+PROVIDER_ID="github"              # ID del provider dentro del pool
 OIDC_ISSUER_URI="https://token.actions.githubusercontent.com"
 GH_ORG="naatlabia-lang"
 GH_REPO="Llama-3v2-1B-Fine-Tuning"
@@ -62,82 +62,90 @@ gcloud services enable \
 # --------- SA de CI ----------
 SA_EMAIL="${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 echo "==> Creando SA de CI (si no existe): $SA_EMAIL"
-gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 || \
-gcloud iam service-accounts create "$SA_ID" --display-name "$SA_DISPLAY"
+gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1 || \
+gcloud iam service-accounts create "$SA_ID" --project "$PROJECT_ID" --display-name "$SA_DISPLAY"
 
 echo "==> Asignando roles mínimos a la SA de CI…"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" --role="roles/artifactregistry.writer" >/dev/null
+  --member="serviceAccount:${SA_EMAIL}" --role="roles/artifactregistry.writer" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.admin" >/dev/null
+  --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectAdmin" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" --role="roles/pubsub.editor" >/dev/null
+  --member="serviceAccount:${SA_EMAIL}" --role="roles/pubsub.publisher" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" --role="roles/bigquery.dataEditor" >/dev/null
+  --member="serviceAccount:${SA_EMAIL}" --role="roles/bigquery.dataEditor" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" --role="roles/bigquery.jobUser" >/dev/null
+  --member="serviceAccount:${SA_EMAIL}" --role="roles/bigquery.jobUser" >/dev/null || true
 
 # --------- Artifact Registry (2 repos) ----------
 echo "==> Creando repositorios en Artifact Registry (${AR_LOC})…"
 for REPO in "$WORKER_REPO" "$JOB_REPO"; do
-  gcloud artifacts repositories describe "$REPO" --location="$AR_LOC" >/dev/null 2>&1 || \
+  gcloud artifacts repositories describe "$REPO" --location="$AR_LOC" --project "$PROJECT_ID" >/dev/null 2>&1 || \
   gcloud artifacts repositories create "$REPO" \
     --repository-format="$AR_FORMAT" \
     --location="$AR_LOC" \
-    --description="Repo for ${REPO} images"
+    --description="Repo for ${REPO} images" \
+    --project "$PROJECT_ID" >/dev/null
 done
 
 # --------- GCS Bucket ----------
 echo "==> Creando bucket GCS de app…"
 gsutil ls -b "gs://${BUCKET_NAME}" >/dev/null 2>&1 || {
-  gsutil mb -l "$REGION" "gs://${BUCKET_NAME}"
+  gsutil mb -p "$PROJECT_ID" -l "$REGION" "gs://${BUCKET_NAME}"
   gsutil uniformbucketlevelaccess set on "gs://${BUCKET_NAME}"
 }
 
 # --------- Pub/Sub ----------
 echo "==> Creando Pub/Sub…"
-gcloud pubsub topics describe "$PUBSUB_TOPIC" >/dev/null 2>&1 || \
-gcloud pubsub topics create "$PUBSUB_TOPIC" >/dev/null
-gcloud pubsub subscriptions describe "$PUBSUB_SUB" >/dev/null 2>&1 || \
-gcloud pubsub subscriptions create "$PUBSUB_SUB" --topic="$PUBSUB_TOPIC" >/dev/null
+gcloud pubsub topics describe "$PUBSUB_TOPIC" --project "$PROJECT_ID" >/dev/null 2>&1 || \
+gcloud pubsub topics create "$PUBSUB_TOPIC" --project "$PROJECT_ID" >/dev/null
+gcloud pubsub subscriptions describe "$PUBSUB_SUB" --project "$PROJECT_ID" >/dev/null 2>&1 || \
+gcloud pubsub subscriptions create "$PUBSUB_SUB" --topic="$PUBSUB_TOPIC" --project "$PROJECT_ID" >/dev/null
 
 # --------- BigQuery ----------
 echo "==> Creando dataset de BigQuery…"
 bq --project_id="$PROJECT_ID" show --format=none "$BQ_DATASET" >/dev/null 2>&1 || \
-bq --location="$BQ_LOC" mk --dataset "${PROJECT_ID}:${BQ_DATASET}"
+bq --location="$BQ_LOC" --project_id="$PROJECT_ID" mk --dataset "${PROJECT_ID}:${BQ_DATASET}"
 
 # --------- Workload Identity Federation (GitHub OIDC) ----------
 echo "==> Configurando Workload Identity Federation (GitHub OIDC)…"
 
+# NOTA: aquí usamos los IDs (no display names)
 WIP_NAME="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIP_ID_SHORT}"
 PROVIDER_NAME="${WIP_NAME}/providers/${PROVIDER_ID}"
 
 # Pool (por ID)
-gcloud iam workload-identity-pools describe "${WIP_ID_SHORT}" --location=global >/dev/null 2>&1 || \
+gcloud iam workload-identity-pools describe "${WIP_ID_SHORT}" \
+  --location=global --project "$PROJECT_ID" >/dev/null 2>&1 || \
 gcloud iam workload-identity-pools create "${WIP_ID_SHORT}" \
-  --location=global --display-name="${WIP_ID_SHORT}"
+  --location=global --project "$PROJECT_ID" \
+  --display-name="${WIP_ID_SHORT}" >/dev/null
 
-# Provider (por ID) + attribute-mapping completo + condición opcional
+# Provider (por ID) + attribute-mapping completo + condición opcional + allowed-audiences
 if ! gcloud iam workload-identity-pools providers describe "${PROVIDER_ID}" \
-      --workload-identity-pool="${WIP_ID_SHORT}" --location=global >/dev/null 2>&1; then
+      --workload-identity-pool="${WIP_ID_SHORT}" --location=global --project "$PROJECT_ID" >/dev/null 2>&1; then
 
-  MAP="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref,attribute.workflow=assertion.workflow"
+  MAP="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.repository_id=assertion.repository_id,attribute.ref=assertion.ref,attribute.workflow=assertion.workflow,attribute.sha=assertion.sha,attribute.event_name=assertion.event_name"
 
   if [[ -n "${ATTR_COND}" ]]; then
     gcloud iam workload-identity-pools providers create-oidc "${PROVIDER_ID}" \
       --workload-identity-pool="${WIP_ID_SHORT}" \
       --location=global \
+      --project "$PROJECT_ID" \
       --display-name="${PROVIDER_ID}" \
       --issuer-uri="${OIDC_ISSUER_URI}" \
+      --allowed-audiences="https://github.com/${GH_ORG}" \
       --attribute-mapping="${MAP}" \
-      --attribute-condition="${ATTR_COND}"
+      --attribute-condition="${ATTR_COND}" >/dev/null
   else
     gcloud iam workload-identity-pools providers create-oidc "${PROVIDER_ID}" \
       --workload-identity-pool="${WIP_ID_SHORT}" \
       --location=global \
+      --project "$PROJECT_ID" \
       --display-name="${PROVIDER_ID}" \
       --issuer-uri="${OIDC_ISSUER_URI}" \
-      --attribute-mapping="${MAP}"
+      --allowed-audiences="https://github.com/${GH_ORG}" \
+      --attribute-mapping="${MAP}" >/dev/null
   fi
 fi
 
@@ -145,28 +153,29 @@ fi
 PROVIDER_MEMBER="principalSet://iam.googleapis.com/${WIP_NAME}/attribute.repository/${GH_ORG}/${GH_REPO}"
 echo "==> Permitiendo que ${GH_ORG}/${GH_REPO} asuma ${SA_EMAIL}…"
 gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+  --project "$PROJECT_ID" \
   --role="roles/iam.workloadIdentityUser" \
-  --member="${PROVIDER_MEMBER}" >/dev/null
+  --member="${PROVIDER_MEMBER}" >/dev/null || true
 
 # --------- Vertex AI: SA runner + staging bucket + permisos ----------
 echo "==> Configurando Vertex AI (runner SA + staging bucket + perms)…"
 VERTEX_SA_EMAIL="${VERTEX_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-gcloud iam service-accounts describe "$VERTEX_SA_EMAIL" >/dev/null 2>&1 || \
-gcloud iam service-accounts create "$VERTEX_SA_ID" --display-name "Vertex AI Runner"
+gcloud iam service-accounts describe "$VERTEX_SA_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1 || \
+gcloud iam service-accounts create "$VERTEX_SA_ID" --project "$PROJECT_ID" --display-name "Vertex AI Runner" >/dev/null
 
 gsutil ls -b "${VERTEX_STAGING_BUCKET}" >/dev/null 2>&1 || \
-gsutil mb -l "$REGION" "${VERTEX_STAGING_BUCKET}"
+gsutil mb -p "$PROJECT_ID" -l "$REGION" "${VERTEX_STAGING_BUCKET}"
 
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/artifactregistry.reader" >/dev/null
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/artifactregistry.reader" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/storage.objectAdmin" >/dev/null
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/storage.objectAdmin" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/logging.logWriter" >/dev/null
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/logging.logWriter" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/monitoring.metricWriter" >/dev/null
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/monitoring.metricWriter" >/dev/null || true
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/aiplatform.user" >/dev/null
+  --member="serviceAccount:${VERTEX_SA_EMAIL}" --role="roles/aiplatform.user" >/dev/null || true
 
 # --------- Salidas útiles ----------
 echo
