@@ -110,43 +110,88 @@ bq --location="$BQ_LOC" --project_id="$PROJECT_ID" mk --dataset "${PROJECT_ID}:$
 # --------- Workload Identity Federation (GitHub OIDC) ----------
 echo "==> Configurando Workload Identity Federation (GitHub OIDC)…"
 
-# NOTA: aquí usamos los IDs (no display names)
+# Sanity: cuenta y proyecto
+ACTIVE_ACCT="$(gcloud config get-value account)"
+ACTIVE_PRJ="$(gcloud config get-value project)"
+if [[ "$ACTIVE_PRJ" != "$PROJECT_ID" ]]; then
+  echo "ERROR: gcloud está en proyecto '$ACTIVE_PRJ', se esperaba '$PROJECT_ID'"
+  exit 2
+fi
+echo "Cuenta activa: $ACTIVE_ACCT  |  Proyecto: $ACTIVE_PRJ"
+
+# NOTA: usamos IDs (no display names)
 WIP_NAME="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIP_ID_SHORT}"
 PROVIDER_NAME="${WIP_NAME}/providers/${PROVIDER_ID}"
 
-# Pool (por ID)
-gcloud iam workload-identity-pools describe "${WIP_ID_SHORT}" \
-  --location=global --project "$PROJECT_ID" >/dev/null 2>&1 || \
-gcloud iam workload-identity-pools create "${WIP_ID_SHORT}" \
-  --location=global --project "$PROJECT_ID" \
-  --display-name="${WIP_ID_SHORT}" >/dev/null
+# 1) Pool (idempotente)
+if ! gcloud iam workload-identity-pools describe "${WIP_ID_SHORT}" \
+      --location=global --project "$PROJECT_ID" >/dev/null 2>&1; then
+  echo "==> Creando Pool '${WIP_ID_SHORT}'…"
+  gcloud iam workload-identity-pools create "${WIP_ID_SHORT}" \
+    --location=global --project "$PROJECT_ID" \
+    --display-name="${WIP_ID_SHORT}" >/dev/null
+else
+  echo "==> Pool ya existe: ${WIP_ID_SHORT}"
+fi
 
-# Provider (por ID) + attribute-mapping completo + condición opcional + allowed-audiences
+# Espera breve por propagación del pool
+for i in {1..10}; do
+  if gcloud iam workload-identity-pools describe "${WIP_ID_SHORT}" \
+        --location=global --project "$PROJECT_ID" >/dev/null 2>&1; then
+    break
+  fi
+  echo "   Esperando propagación del Pool… intento $i/10"
+  sleep 2
+done
+
+# 2) Provider OIDC (idempotente, con reintentos)
 if ! gcloud iam workload-identity-pools providers describe "${PROVIDER_ID}" \
       --workload-identity-pool="${WIP_ID_SHORT}" --location=global --project "$PROJECT_ID" >/dev/null 2>&1; then
 
   MAP="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.repository_id=assertion.repository_id,attribute.ref=assertion.ref,attribute.workflow=assertion.workflow,attribute.sha=assertion.sha,attribute.event_name=assertion.event_name"
 
+  echo "==> Creando Provider '${PROVIDER_ID}' en pool '${WIP_ID_SHORT}'…"
+  CREATE_ARGS=(
+    iam workload-identity-pools providers create-oidc "${PROVIDER_ID}"
+    --workload-identity-pool="${WIP_ID_SHORT}"
+    --location=global
+    --project "$PROJECT_ID"
+    --display-name="${PROVIDER_ID}"
+    --issuer-uri="${OIDC_ISSUER_URI}"
+    --allowed-audiences="https://github.com/${GH_ORG}"
+    --attribute-mapping="${MAP}"
+  )
   if [[ -n "${ATTR_COND}" ]]; then
-    gcloud iam workload-identity-pools providers create-oidc "${PROVIDER_ID}" \
-      --workload-identity-pool="${WIP_ID_SHORT}" \
-      --location=global \
-      --project "$PROJECT_ID" \
-      --display-name="${PROVIDER_ID}" \
-      --issuer-uri="${OIDC_ISSUER_URI}" \
-      --allowed-audiences="https://github.com/${GH_ORG}" \
-      --attribute-mapping="${MAP}" \
-      --attribute-condition="${ATTR_COND}" >/dev/null
-  else
-    gcloud iam workload-identity-pools providers create-oidc "${PROVIDER_ID}" \
-      --workload-identity-pool="${WIP_ID_SHORT}" \
-      --location=global \
-      --project "$PROJECT_ID" \
-      --display-name="${PROVIDER_ID}" \
-      --issuer-uri="${OIDC_ISSUER_URI}" \
-      --allowed-audiences="https://github.com/${GH_ORG}" \
-      --attribute-mapping="${MAP}" >/dev/null
+    CREATE_ARGS+=( --attribute-condition="${ATTR_COND}" )
   fi
+
+  # Reintentos por eventual consistency
+  set +e
+  for i in {1..5}; do
+    if gcloud "${CREATE_ARGS[@]}" >/dev/null 2>&1; then
+      echo "   Provider creado."
+      OK=1
+      break
+    else
+      RC=$?
+      echo "   WARNING: create-oidc falló (intento $i/5, rc=$RC). Reintentando en 3s…"
+      sleep 3
+    fi
+  done
+  set -e
+
+  if [[ "${OK:-0}" != "1" ]]; then
+    echo "ERROR: No se pudo crear el provider. Causas típicas:"
+    echo " - El pool '${WIP_ID_SHORT}' no existe o no es accesible."
+    echo " - La cuenta '${ACTIVE_ACCT}' no tiene 'roles/iam.workloadIdentityPoolAdmin'."
+    echo " - Proyecto incorrecto: '$ACTIVE_PRJ' (esperado '$PROJECT_ID')."
+    echo "Diagnóstico rápido:"
+    echo "  gcloud iam workload-identity-pools list --location=global --project='$PROJECT_ID'"
+    echo "  gcloud iam workload-identity-pools describe '${WIP_ID_SHORT}' --location=global --project='$PROJECT_ID'"
+    exit 3
+  fi
+else
+  echo "==> Provider ya existe: ${PROVIDER_ID}"
 fi
 
 # Binding a la SA (principalSet usa el resource name del pool)
