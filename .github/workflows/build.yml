@@ -13,18 +13,23 @@ on:
       - "worker/**"
       - "job/**"
       - ".github/workflows/build.yml"
+  workflow_dispatch: {}
 
 permissions:
   contents: read
-  id-token: write
+  id-token: write  # WIF
 
 env:
   AR_LOC: ${{ vars.AR_LOC }}
   PROJECT_ID: ${{ vars.PROJECT_ID }}
   WORKER_REPO: ${{ vars.WORKER_REPO }}
   JOB_REPO: ${{ vars.JOB_REPO }}
-  WORKER_TORCH_DEVICE: ${{ vars.WORKER_TORCH_DEVICE }}   # cpu | cu121 | cu122, etc.
-  JOB_TORCH_DEVICE: ${{ vars.JOB_TORCH_DEVICE }}         # cpu | cu121 | cu122, etc.
+  WORKER_TORCH_DEVICE: ${{ vars.WORKER_TORCH_DEVICE }}   # cpu | cu121 | cu122...
+  JOB_TORCH_DEVICE: ${{ vars.JOB_TORCH_DEVICE }}         # cpu | cu121 | cu122...
+
+concurrency:
+  group: build-${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   plan-matrix:
@@ -46,25 +51,25 @@ jobs:
       - id: set
         shell: bash
         run: |
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
+          MATRIX='{"include":[]}'
+          add_entry () {
+            local name="$1" path="$2" repo="$3" torch="$4"
+            MATRIX=$(jq -c --arg n "$name" --arg p "$path" --arg r "$repo" --arg t "$torch" \
+              '.include += [{"name":$n,"path":$p,"repo":$r,"torch":$t}]' <<<"$MATRIX")
+          }
 
-          MATRIX=$(jq -cn '{include: []}')
-
+          # Añade targets cambiados
           if [[ "${{ steps.changes.outputs.worker }}" == 'true' ]]; then
-            MATRIX=$(jq -c \
-              --arg repo "${{ env.WORKER_REPO }}" \
-              --arg torch "${{ env.WORKER_TORCH_DEVICE }}" \
-              '.include += [{name:"worker",path:"worker",repo:$repo,torch:$torch}]' \
-              <<<"$MATRIX")
+            add_entry "worker" "worker" "${{ env.WORKER_REPO }}" "${{ env.WORKER_TORCH_DEVICE }}"
+          fi
+          if [[ "${{ steps.changes.outputs.job }}" == 'true' ]]; then
+            add_entry "job" "job" "${{ env.JOB_REPO }}" "${{ env.JOB_TORCH_DEVICE }}"
           fi
 
-          if [[ "${{ steps.changes.outputs.job }}" == 'true' ]]; then
-            MATRIX=$(jq -c \
-              --arg repo "${{ env.JOB_REPO }}" \
-              --arg torch "${{ env.JOB_TORCH_DEVICE }}" \
-              '.include += [{name:"job",path:"job",repo:$repo,torch:$torch}]' \
-              <<<"$MATRIX")
+          # Fallback: si no detectó cambios, construye ambos
+          if [[ "$MATRIX" == '{"include":[]}' ]]; then
+            add_entry "worker" "worker" "${{ env.WORKER_REPO }}" "${{ env.WORKER_TORCH_DEVICE }}"
+            add_entry "job"    "job"    "${{ env.JOB_REPO }}"    "${{ env.JOB_TORCH_DEVICE }}"
           fi
 
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -76,55 +81,69 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan-matrix.outputs.matrix) }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check secret present
-        env:
-          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
-        shell: bash
-        run: |
-          if [[ -z "$GCP_CREDENTIALS" ]]; then
-            echo "Missing GCP_CREDENTIALS secret"
-            exit 1
-          fi
-          echo "Secret is present"
-
-      - name: Auth to Google Cloud (JSON)
+      # Auth GCP vía WIF (sin JSON)
+      - name: Auth to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
 
       - name: Docker login to Artifact Registry
+        run: gcloud auth configure-docker "${{ env.AR_LOC }}-docker.pkg.dev" --quiet
+
+      #  Buildx + caché
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image meta
+        id: meta
+        shell: bash
         run: |
-          gcloud auth configure-docker "${{ env.AR_LOC }}-docker.pkg.dev" --quiet
+          REG_HOST="${{ env.AR_LOC }}-docker.pkg.dev"
+          IMAGE_BASE="${REG_HOST}/${{ env.PROJECT_ID }}/${{ matrix.repo }}/${{ matrix.name }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          DATE_TAG="$(date -u +%Y%m%d)"
+          TORCH="${{ matrix.torch }}"
 
-      - name: Build image
-        env:
-          REG_HOST: ${{ env.AR_LOC }}-docker.pkg.dev
-          PROJECT_ID: ${{ env.PROJECT_ID }}
-          REPO: ${{ matrix.repo }}      
-          IMAGE: ${{ matrix.name }}     
-          TORCH: ${{ matrix.torch }}
-          PATH_DIR: ${{ matrix.path }}
+          echo "IMAGE_BASE=$IMAGE_BASE"       >> $GITHUB_OUTPUT
+          echo "TAG_SHA=${TORCH}-${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          echo "TAG_LATEST=${TORCH}-latest"     >> $GITHUB_OUTPUT
+          echo "TAG_SHORT=${TORCH}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "TAG_BRANCH=${TORCH}-${BRANCH}"   >> $GITHUB_OUTPUT
+          echo "TAG_DATE=${TORCH}-${DATE_TAG}"   >> $GITHUB_OUTPUT
+
+      # Labels OCI útiles
+      - name: Labels
+        id: labels
         run: |
-          IMAGE_BASE="${REG_HOST}/${PROJECT_ID}/${REPO}/${IMAGE}"
-          IMAGE_TAG_SHA="${IMAGE_BASE}:${TORCH}-${GITHUB_SHA}"
-          IMAGE_TAG_LATEST="${IMAGE_BASE}:${TORCH}-latest"
+          echo "labels=org.opencontainers.image.source=${{ github.repository }},org.opencontainers.image.revision=${{ github.sha }},org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
-          echo "IMAGE_TAG_SHA=$IMAGE_TAG_SHA" >> $GITHUB_ENV
-          echo "IMAGE_TAG_LATEST=$IMAGE_TAG_LATEST" >> $GITHUB_ENV
-
-          docker build \
-            --build-arg TORCH_DEVICE="$TORCH" \
-            -t "$IMAGE_TAG_SHA" \
-            -f "${PATH_DIR}/Dockerfile" "${PATH_DIR}"
-
-      - name: Tag & Push image
-        run: |
-          docker tag "$IMAGE_TAG_SHA" "$IMAGE_TAG_LATEST"
-          docker push "$IMAGE_TAG_SHA"
-          docker push "$IMAGE_TAG_LATEST"
+      - name: Build & Push (cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.path }}
+          file: ${{ matrix.path }}/Dockerfile
+          push: true
+          build-args: |
+            TORCH_DEVICE=${{ matrix.torch }}
+          labels: ${{ steps.labels.outputs.labels }}
+          tags: |
+            ${{ steps.meta.outputs.IMAGE_BASE }}:${{ steps.meta.outputs.TAG_SHA }}
+            ${{ steps.meta.outputs.IMAGE_BASE }}:${{ steps.meta.outputs.TAG_LATEST }}
+            ${{ steps.meta.outputs.IMAGE_BASE }}:${{ steps.meta.outputs.TAG_SHORT }}
+            ${{ steps.meta.outputs.IMAGE_BASE }}:${{ steps.meta.outputs.TAG_BRANCH }}
+            ${{ steps.meta.outputs.IMAGE_BASE }}:${{ steps.meta.outputs.TAG_DATE }}
+          cache-from: |
+            type=gha,scope=${{ matrix.name }}-${{ matrix.torch }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.torch }}
