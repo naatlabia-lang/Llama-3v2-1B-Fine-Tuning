@@ -103,34 +103,34 @@ jobs:
       - name: Docker login to Artifact Registry
         run: gcloud auth configure-docker "${{ env.AR_LOC }}-docker.pkg.dev" --quiet
 
+      - name: Compute tags
+        id: tags
+        run: |
+          REG_HOST="${{ env.AR_LOC }}-docker.pkg.dev"
+          IMAGE_BASE="${REG_HOST}/${{ env.PROJECT_ID }}/${{ matrix.repo }}/${{ matrix.name }}"
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          echo "IMAGE_BASE=$IMAGE_BASE"                     >> $GITHUB_OUTPUT
+          echo "TAG_SHA=${{ matrix.torch }}-${GITHUB_SHA}"  >> $GITHUB_OUTPUT
+          echo "TAG_LATEST=${{ matrix.torch }}-latest"      >> $GITHUB_OUTPUT
+          echo "TAG_BRANCH=${{ matrix.torch }}-${BRANCH}"   >> $GITHUB_OUTPUT
+
       - name: Build image
-        env:
-          REG_HOST: ${{ env.AR_LOC }}-docker.pkg.dev
-          PROJECT_ID: ${{ env.PROJECT_ID }}
-          REPO: ${{ matrix.repo }}
-          IMAGE: ${{ matrix.name }}
-          TORCH: ${{ matrix.torch }}
-          PATH_DIR: ${{ matrix.path }}
-          BRANCH: ${{ github.ref_name }}
         run: |
-          IMAGE_BASE="${REG_HOST}/${PROJECT_ID}/${REPO}/${IMAGE}"
-          IMAGE_TAG_SHA="${IMAGE_BASE}:${TORCH}-${GITHUB_SHA}"
-          IMAGE_TAG_LATEST="${IMAGE_BASE}:${TORCH}-latest"
-          IMAGE_TAG_BRANCH="${IMAGE_BASE}:${TORCH}-${BRANCH//\//-}"
-
-          echo "IMAGE_TAG_SHA=$IMAGE_TAG_SHA" >> $GITHUB_ENV
-          echo "IMAGE_TAG_LATEST=$IMAGE_TAG_LATEST" >> $GITHUB_ENV
-          echo "IMAGE_TAG_BRANCH=$IMAGE_TAG_BRANCH" >> $GITHUB_ENV
-
           docker build \
-            --build-arg TORCH_DEVICE="$TORCH" \
-            -t "$IMAGE_TAG_SHA" \
-            -t "$IMAGE_TAG_BRANCH" \
-            -f "${PATH_DIR}/Dockerfile" "${PATH_DIR}"
+            --build-arg TORCH_DEVICE="${{ matrix.torch }}" \
+            -t "${{ steps.tags.outputs.IMAGE_BASE }}:${{ steps.tags.outputs.TAG_SHA }}" \
+            -t "${{ steps.tags.outputs.IMAGE_BASE }}:${{ steps.tags.outputs.TAG_BRANCH }}" \
+            -f "${{ matrix.path }}/Dockerfile" "${{ matrix.path }}"
 
-      - name: Tag & Push image
+      - name: Push SHA + latest
         run: |
-          docker tag "$IMAGE_TAG_SHA" "$IMAGE_TAG_LATEST"
-          docker push "$IMAGE_TAG_SHA"
-          docker push "$IMAGE_TAG_LATEST"
-          docker push "$IMAGE_TAG_BRANCH"
+          docker tag  "${{ steps.tags.outputs.IMAGE_BASE }}:${{ steps.tags.outputs.TAG_SHA }}" \
+                      "${{ steps.tags.outputs.IMAGE_BASE }}:${{ steps.tags.outputs.TAG_LATEST }}"
+          docker push "${{ steps.tags.outputs.IMAGE_BASE }}:${{ steps.tags.outputs.TAG_SHA }}"
+          docker push "${{ steps.tags.outputs.IMAGE_BASE }}:${{ steps.tags.outputs.TAG_LATEST }}"
+
+      - name: Push branch tag (solo en push)
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          docker push "${{ steps.tags.outputs.IMAGE_BASE }}:${{ steps.tags.outputs.TAG_BRANCH }}"
+
