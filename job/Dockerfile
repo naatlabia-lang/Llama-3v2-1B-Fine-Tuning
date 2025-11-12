@@ -8,4 +8,3 @@ RUN pip install -U pip && pip install -r /tmp/requirements.txt
 COPY /src/loggin /opt/loggin
 ENV PYTHONPATH="/opt:${PYTHONPATH}"
 CMD ["python","-c","import ray; print('Ray', ray.__version__)"]
-
