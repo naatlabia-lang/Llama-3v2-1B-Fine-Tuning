@@ -41,3 +41,4 @@ class GCPLogger:
 
     def get_logger(self, logger_name: str | None = None):
         return logging.getLogger(logger_name or __name__)
+
