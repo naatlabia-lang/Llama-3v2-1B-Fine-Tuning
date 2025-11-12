@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl ca-certificates libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
 COPY requirements-worker-cpu.txt /tmp/requirements.txt
 RUN pip install -U pip && pip install -r /tmp/requirements.txt
-COPY loggin /opt/loggin
+COPY /src/loggin /opt/loggin
 ENV PYTHONPATH="/opt:${PYTHONPATH}"
 CMD ["python","-c","import torch;import ray;print('Torch', torch.__version__)"]
 
