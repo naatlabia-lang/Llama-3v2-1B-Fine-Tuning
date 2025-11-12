@@ -83,12 +83,12 @@ jobs:
       - name: Check WIF secrets present
         run: |
           if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
-            echo "❌ Falta secret GCP_WORKLOAD_IDENTITY_PROVIDER"; exit 1; fi
+            echo " Falta secret GCP_WORKLOAD_IDENTITY_PROVIDER"; exit 1; fi
           if [ -z "${{ secrets.GCP_SERVICE_ACCOUNT }}" ]; then
-            echo "❌ Falta secret GCP_SERVICE_ACCOUNT"; exit 1; fi
-          echo "✅ Secrets OK"
+            echo " Falta secret GCP_SERVICE_ACCOUNT"; exit 1; fi
+          echo " Secrets OK"
 
-      # ✅ Autenticación GCP por WIF (sin JSON)
+      #  Autenticación GCP por WIF (sin JSON)
       - name: Auth to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
