@@ -1,8 +1,5 @@
+# loggin/__init__.py
 from .gcp_logger import GCPLogger
 
-__all__ = ["GCPLogger"]
-
-def init_logger(*args, **kwargs):
-    gl = GCPLogger(*args, **kwargs)
-    gl.init()
-    return gl.get_logger()
+def init_logger(name: str = "ray-app", **kwargs):
+    return GCPLogger(name=name, **kwargs).init()
